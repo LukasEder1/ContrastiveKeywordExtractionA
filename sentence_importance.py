@@ -365,7 +365,7 @@ def rank_yake(documents, keyword_counts, top_n=5):
 
 def yake_weighted_importance(documents):
     #maybe inculde ngram latter
-    weighted_keyword_counts = sentence_importance.yake_weighted_keyword_frequency(documents, ngram_size=3)
+    weighted_keyword_counts = yake_weighted_keyword_frequency(documents, ngram_size=3)
     
     sentences, imp_indices, ranking = rank_yake(documents, weighted_keyword_counts)
     
@@ -374,7 +374,7 @@ def yake_weighted_importance(documents):
 
 def yake_unweighted_importance(documents, ngram):
     
-    weighted_keyword_counts = sentence_importance.yake_keyword_frequency(documents, ngram_size=3)
+    weighted_keyword_counts = yake_keyword_frequency(documents, ngram_size=3)
     
     sentences, imp_indices, ranking = rank_yake(documents, weighted_keyword_counts)
     
