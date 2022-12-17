@@ -3,6 +3,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
 import torch
 import nltk
+import utilities
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+
 
 def opcodes(a, b):
     s = SequenceMatcher(None, a, b)
@@ -21,24 +25,27 @@ def syntactic_ratio(a, b):
     # rule-of-thumb: ratio > 0.6 -> similar
     return s.ratio()
 
+
 def find_additions_deletions(a, b):
     """
-    finds the differnce inform of
-    two strings addition/ deletions
-    between two strings
+    returns a list of monogram additions in the string b
+    returns a list of monogram deletions from string a 
     """
     
     # init differ
     d = Differ()
     
     # compare the two 
-    diff = d.compare(a, b)
-    changes = [change for change in diff if change.startswith('-') or  change.startswith('+')]
+    diff = d.compare(a.split(), b.split())
+    changes = [change for change in diff if change.startswith('-') or change.startswith('+')]
     
     # output:
-    additions = ""
-    deletions = ""
+    additions = []
+    deletions = []
     
+    
+    
+    # add all monograms that indicate change
     for change in changes:
         type_of_change  = 'addition' if change[0] == '+' else 'deletion'
         
@@ -46,15 +53,109 @@ def find_additions_deletions(a, b):
         actual_change = change[2:]
         
         if type_of_change == 'addition':
-            additions += actual_change
+            additions.append(actual_change.lower())
             
         else:
-            deletions += actual_change
+            deletions.append(actual_change)
+    
+    
+    return additions, deletions
+
+def find_additions_deletions_ngrams(mono_additions, b, ngram):
+    
+    # split later version into ngrams
+    b_ngrams = list(nltk.ngrams(b.lower().split(), ngram))
+
+    # split monogram additions into ngram addtions if they appear next
+    # to one onther in string b
+    ngram_additions = list(nltk.ngrams(mono_additions, ngram))
+
+    # list of additions of current ngram length
+    # i.e: for ngram=2 this list only contains bigrams
+    additions = []
+    
+    for ngram_addition in ngram_additions:
+        
+        # check if the two additions appear next to each other in string b
+        if ngram_addition in b_ngrams:
+            additions.append(" ".join(ngram_addition))
+            
+    return additions
+
+def find_additions_deletions_max_ngram(a, b, max_ngram, symbols_to_remove):
+    
+    a = utilities.remove_punctuation(a, symbols_to_remove)
+    b = utilities.remove_punctuation(b, symbols_to_remove)
+    
+    # extract all single word additions
+    mono_additions, deletions = find_additions_deletions(a, b)
+    
+    # total list of additions
+    # i.e.: for max_ngram = 3, this list contains
+    # mono-, bi- and trigrams
+    additions = mono_additions.copy()
+    
+    for i in range(2, max_ngram+1):
+        
+        # find i-gram additions
+        current_additions = find_additions_deletions_ngrams(mono_additions, b, i)
+        
+        # expand total additions list
+        additions += current_additions
+        
+    # TODO: deletions are still only for single words
     
     return additions, deletions
 
 
-def match_sentences(document_a, document_b, k = 1, model='all-MiniLM-L6-v2', threshold=0.6):
+def match_sentences_tfidf_weighted(document_a, document_b, *args):
+    
+    # Use the sentences in A as queries
+    queries = nltk.sent_tokenize(document_a)
+    
+    # Use the sentences in B as our corpus
+    corpus = nltk.sent_tokenize(document_b)
+    
+    # matched_sentences dict:
+    # key = query_idx
+    # value = list of matched sentences and score pairs = [(matched_sentence, similarity_score)]
+    matched_sentences = {i:[(-1, 0)] for i in range(len(queries))}
+    
+    for query_idx in range(len(queries)):
+        
+        query = queries[query_idx]
+        # combine the sentences into a single list
+        sents = [query] + corpus
+
+        # create a tf-idf matrix for the sentences
+        vectorizer = TfidfVectorizer()
+        tfidf_matrix = vectorizer.fit_transform(sents)
+
+        # find the cosine similarity of the sentences in the tf-idf matrix
+        cosine_similarities = np.dot(tfidf_matrix, tfidf_matrix.T)
+
+        # print the sentences with high tf-idf weight and cosine similarity
+        
+        maximum_score = cosine_similarities[0, 1]
+        max_idx = 0
+        
+        for i in range(2, len(sents)):
+            if cosine_similarities[0, i] > maximum_score:
+                maximum_score = cosine_similarities[0, i]
+                max_idx = i - 1
+                
+        
+
+        #print("score: ", round(maximum_score, 5), "\n")
+        #print("Query:", query)
+        #print("Matched:", sents[max_idx], "\n")
+        matched_sentences[query_idx] = [(max_idx, round(maximum_score, 5))]
+        
+    return matched_sentences
+
+
+
+def match_sentences_semantic_search(document_a, document_b, k = 1, model='all-MiniLM-L6-v2', threshold=0.6):
     
     # Model to be used to create Embeddings which we will use for semantic search
     embedder = SentenceTransformer(model)
@@ -97,8 +198,9 @@ def find_added_indices(matched_indices, corpus_length):
     
     return list(set(corpus_indices) - set(matched_indices))
 
-def detect_changes(matched_dict, document_a, document_b, important_indices, top_k=1, show_output=False):
-    
+def detect_changes(matched_dict, document_a, document_b, important_indices, max_ngram,top_k=1, show_output=False,       
+                   symbols_to_remove=[","]):
+        
     # Use the sentences in A as queries
     queries = nltk.sent_tokenize(document_a)
     
@@ -125,37 +227,39 @@ def detect_changes(matched_dict, document_a, document_b, important_indices, top_
         
         for k in range(top_k):
             
+            
             # get current matched_sentence + score
             matched_idx, score = matched_dict[query_idx][k]
             
-            matched_indices.append(int(matched_idx))
-            
-            # get the actual sentence
-            matched_sentence = corpus[int(matched_idx)]
-            
-            
-            additions, deletions = find_additions_deletions(query, matched_sentence)
-            
-            # get syntactic ratio
-            ratio = syntactic_ratio(query, matched_sentence)
-            
-            if show_output:
-                print(f"query: {query}\nmatched: {matched_sentence}\nSemantic Resemblence: {score:.4f}\n"
-                      f"Syntactic Resemblence: {ratio:.4f}\n")
+            if matched_idx >= 0:
+                matched_indices.append(int(matched_idx))
 
-                # extract addtions and deletions
-                
-                
-                print(f"added in newer version:{additions}\ndeleted from older version: {deletions}")
-                
-                print("------------------------------------------------------------------------------\n")
+                # get the actual sentence
+                matched_sentence = corpus[int(matched_idx)]
 
-            if ratio < 1.0:
-                changed_sentences.append(query_idx)
-                
-                save_additions[query_idx] = additions
-                
-                save_deletions[query_idx] = deletions
+
+                additions, deletions = find_additions_deletions_max_ngram(query, matched_sentence, max_ngram, symbols_to_remove)
+
+                # get syntactic ratio
+                ratio = syntactic_ratio(query, matched_sentence)
+
+                if show_output:
+                    print(f"query: {query}\nmatched: {matched_sentence}\nSemantic Resemblence: {score:.4f}\n"
+                          f"Syntactic Resemblence: {ratio:.4f}\n")
+
+                    # extract addtions and deletions
+
+
+                    print(f"added in newer version:{additions}\ndeleted from older version: {deletions}")
+
+                    print("------------------------------------------------------------------------------\n")
+
+                if ratio < 1.0:
+                    changed_sentences.append(query_idx)
+
+                    save_additions[query_idx] = additions
+
+                    save_deletions[query_idx] = deletions
                 
     #drop_unimportant_indices(changed_sentences, important_indices=important_indices[version])
     
